@@ -1,5 +1,5 @@
 // Imports
-const airtable = require('airtable');
+import airtable from 'airtable';
 
 // Secret constants
 const { AIRTABLE_API_TOKEN, OPTIMIZELY_API_TOKEN } = process.env;
@@ -209,7 +209,7 @@ const getOptimizelyResults = (experimentId) => {
 };
 
 // Main function
-const handler = async () => {
+export const handler = async () => {
   console.log('Starting import...');
 
   // // Get current records in Airtable
@@ -267,7 +267,3 @@ const handler = async () => {
 
   console.log('Import completed!');
 };
-
-if (require.main === module) {
-  handler();
-}
