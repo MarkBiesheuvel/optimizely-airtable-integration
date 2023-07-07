@@ -26,19 +26,17 @@ const table = airtable.base(BASE_ID)(TABLE_NAME);
 const getAirtableRecords = () => {
   // Return a Promise so we can await the response
   return new Promise((resolve, reject) => {
-    // Start with empty map
-    let result = {};
+    // Start with empty array
+    let result = [];
 
     // NOTE: I don't understand how to get pagination working
     table.select({
-        fields: ['ID']
+        fields: []
     }).eachPage((records, next) => {
 
       // Add each record on current page to the map
       records.forEach((record) => {
-        const recordId = record.id;
-        const experimentId = parseInt(record.fields['ID']);
-        result[experimentId] = recordId;
+        result.push(record.id);
       });
 
       next();
@@ -54,32 +52,11 @@ const getAirtableRecords = () => {
   });
 };
 
-const createAirtableRecord = (fields) => {
+const createAirtableRecords = (rows) => {
   // Return a Promise so we can await the response
   return new Promise((resolve, reject) => {
     // Create new record
-    table.create([
-      { fields }
-    ], {
-      typecast: true
-    }, (error, result) => {
-      // Resolve promise
-      if (error) {
-        reject(error);
-      } else {
-        resolve(result);
-      }
-    });
-  });
-};
-
-const updateAirtableRecord = (id, fields) => {
-  // Return a Promise so we can await the response
-  return new Promise((resolve, reject) => {
-    // Create new record
-    table.update([
-      { id, fields }
-    ], {
+    table.create(rows, {
       typecast: true
     }, (error, result) => {
       // Resolve promise
@@ -114,55 +91,40 @@ const deleteAirtableRecords = (ids) => {
 };
 
 // Combine project, experiment and results into Airtable fields
-const buildAirtableFields = (project, experiment, results) => {
+const buildAirtableFields = (project, experiment, results, variation, metric) => {
   // Set base line of fields
   let fields = {
-    'Name': experiment.name,
-    'ID': experiment.id,
+    'Experiment Name': experiment.name,
+    'Variation Name': variation.name,
+    'ID': variation.variation_id,
     'Project': project.name,
     'Status': experiment.status
   };
 
   // Add additional fields from results
-  if (results && results.metrics) {
+  if (results) {
     fields = {
       'Start': results.start_time,
       'End': results.end_time,
       ...fields
     };
+  }
 
-    // Find the revenue metric (instead of just the primary metric)
-    const metric = results.metrics.find(({name, field, aggregator}) => {
-      return name === 'Universal Sale' && field === 'revenue' && aggregator === 'sum'
-    });
+  if (metric && variation.variation_id in metric.results) {
+    const { lift, value } = metric.results[variation.variation_id];
 
-    // Find the variation with the highest improvement
-    const winningVariation = Object.values(metric.results).reduce((acc, variation) => {
-      if (!variation.lift) {
-        return acc;
-      }
-      if (!acc || !acc.lift) {
-        return variation;
-      }
-      // Compare lift
-      if (acc.lift.value > variation.lift.value) {
-        return acc;
-      } else {
-        return variation;
-      }
-    });
+    fields = {
+      'Total Revenue': value / 100.0, // Revenue is given in cents
+      ...fields
+    };
 
-    // Add even more additional fields from treatment uplift
-    if (winningVariation && winningVariation.lift) {
-      const { lift, value } = winningVariation;
-
+    if (lift) {
       // Don't just show MAX INT
       if (lift.visitors_remaining === 9223372036854776000) {
         lift.visitors_remaining = null;
       }
 
       fields = {
-        'Total Revenue': value / 100.0, // Revenue is given in cents
         'Improvement': lift.value,
         'Statistical Significance': lift.significance,
         'Remaining Visitors': lift.visitors_remaining,
@@ -180,6 +142,23 @@ const buildAirtableFields = (project, experiment, results) => {
   }
 
   return fields;
+};
+
+const buildAirtableRows = (project, experiment, results) => {
+  let metric = null;
+  if (results && results.metrics) {
+    // Find the revenue metric (instead of just the primary metric)
+    metric = results.metrics.find(({name, field, aggregator}) => {
+      return name === 'Universal Sale' && field === 'revenue' && aggregator === 'sum'
+    });
+  }
+
+  // Create a row for each variation
+  return experiment.variations.map((variation) => {
+    return {
+      fields: buildAirtableFields(project, experiment, results, variation, metric)
+    };
+  });
 };
 
 // Helper function for making request to Optimizely API
@@ -213,19 +192,34 @@ const getOptimizelyResults = (experimentId) => {
 
 // Main function
 export const handler = async () => {
-  console.log('Starting import...');
-
-  // // Get current records in Airtable
+  console.log('Reading current table...');
+  // Get current records in Airtable
   let records = await getAirtableRecords(table);
 
+  console.log('Clearing table...');
+  // Remove all records
+  await Promise.all(records.reduce((chunks, record, i) => {
+    const j = Math.floor(i / 10);
+    if (!chunks[j]) {
+      chunks[j] = [record];
+    } else {
+      chunks[j].push(record);
+    }
+    return chunks;
+  }, []).map(async (chunk) => {
+    await deleteAirtableRecords(chunk);
+  }));
+
+  console.log('Retrieving Optimizely projects...');
   // Get all projects
   const projects = await getOptimizelyProjects();
 
+  console.log('Inserting Airtable rows...');
   // Iterate over all projects asynchronously
   await Promise.all(projects.map(async (project) => {
 
     // Skipping "Dev Test Project"
-    if (project.name === 'Dev Test Project') {
+    if (project.name === 'Dev Test Project' || project.name === 'QA Project (July 2023)') {
       return;
     }
 
@@ -248,25 +242,11 @@ export const handler = async () => {
       }
 
       // Combine all data into fields for Airtable
-      const fields = buildAirtableFields(project, experiment, results);
+      const rows = buildAirtableRows(project, experiment, results);
 
-      if (experiment.id in records) {
-        // Update existing record
-        const recordId = records[experiment.id];
-        await updateAirtableRecord(recordId, fields);
-
-        // Mark as done
-        delete records[experiment.id];
-      } else {
-        // Insert new record
-        await createAirtableRecord(fields);
-      }
+      await createAirtableRecords(rows);
     }));
   }));
-
-  // Remove records that no longer exist
-  console.log('Cleaning up...');
-  await deleteAirtableRecords(Object.values(records));
 
   console.log('Import completed!');
 };
