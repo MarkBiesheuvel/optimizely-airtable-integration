@@ -110,6 +110,17 @@ const buildAirtableFields = (project, experiment, results, variation, metric) =>
     };
   }
 
+  // Add field from reach
+  if (results && results.reach && variation.variation_id in results.reach.variations) {
+    const { value } = results.reach.variations[variation.variation_id];
+
+    fields = {
+      'Total Visitors': value,
+      ...fields
+    };
+  }
+
+  // Add fields from metric
   if (metric && variation.variation_id in metric.results) {
     const { lift, value } = metric.results[variation.variation_id];
 
@@ -194,7 +205,7 @@ const getOptimizelyResults = (experimentId) => {
 export const handler = async () => {
   console.log('Reading current table...');
   // Get current records in Airtable
-  let records = await getAirtableRecords(table);
+  const records = await getAirtableRecords(table);
 
   console.log('Clearing table...');
   // Remove all records
