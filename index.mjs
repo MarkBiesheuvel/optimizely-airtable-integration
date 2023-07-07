@@ -26,17 +26,19 @@ const table = airtable.base(BASE_ID)(TABLE_NAME);
 const getAirtableRecords = () => {
   // Return a Promise so we can await the response
   return new Promise((resolve, reject) => {
-    // Start with empty array
-    let result = [];
+    // Start with empty map
+    let result = {};
 
     // NOTE: I don't understand how to get pagination working
     table.select({
-        fields: []
+        fields: ['ID']
     }).eachPage((records, next) => {
 
       // Add each record on current page to the map
       records.forEach((record) => {
-        result.push(record.id);
+        const recordId = record.id;
+        const experimentId = parseInt(record.fields['ID']);
+        result[experimentId] = recordId;
       });
 
       next();
@@ -52,11 +54,13 @@ const getAirtableRecords = () => {
   });
 };
 
-const createAirtableRecords = (rows) => {
+const createAirtableRecord = (fields) => {
   // Return a Promise so we can await the response
   return new Promise((resolve, reject) => {
     // Create new record
-    table.create(rows, {
+    table.create([
+      { fields }
+    ], {
       typecast: true
     }, (error, result) => {
       // Resolve promise
@@ -69,17 +73,30 @@ const createAirtableRecords = (rows) => {
   });
 };
 
-const deleteAirtableRecords = (ids) => {
+const updateAirtableRecord = (id, fields) => {
   // Return a Promise so we can await the response
   return new Promise((resolve, reject) => {
-    // No need to make request when nothing to delete
-    if (ids.length === 0) {
-      resolve([]);
-      return;
-    }
+    // Update record
+    table.update([
+      { id, fields }
+    ], {
+      typecast: true
+    }, (error, result) => {
+      // Resolve promise
+      if (error) {
+        reject(error);
+      } else {
+        resolve(result);
+      }
+    });
+  });
+};
 
-    // Create new record
-    table.destroy(ids, (error, result) => {
+const deleteAirtableRecord = (id) => {
+  // Return a Promise so we can await the response
+  return new Promise((resolve, reject) => {
+    // Delete record
+    table.destroy([id], (error, result) => {
       // Resolve promise
       if (error) {
         reject(error);
@@ -91,13 +108,13 @@ const deleteAirtableRecords = (ids) => {
 };
 
 // Combine project, experiment and results into Airtable fields
-const buildAirtableFields = (project, experiment, results, variation, metric) => {
+const buildAirtableFields = (experiment, results, variation, metric) => {
   // Set base line of fields
   let fields = {
     'Experiment Name': experiment.name,
     'Variation Name': variation.name,
     'ID': variation.variation_id,
-    'Project': project.name,
+    // 'Project': experiment.project_name,
     'Status': experiment.status
   };
 
@@ -155,7 +172,7 @@ const buildAirtableFields = (project, experiment, results, variation, metric) =>
   return fields;
 };
 
-const buildAirtableRows = (project, experiment, results) => {
+const buildAirtableRows = (experiment, results) => {
   let metric = null;
   if (results && results.metrics) {
     // Find the revenue metric (instead of just the primary metric)
@@ -166,9 +183,7 @@ const buildAirtableRows = (project, experiment, results) => {
 
   // Create a row for each variation
   return experiment.variations.map((variation) => {
-    return {
-      fields: buildAirtableFields(project, experiment, results, variation, metric)
-    };
+    return buildAirtableFields(experiment, results, variation, metric);
   });
 };
 
@@ -203,60 +218,72 @@ const getOptimizelyResults = (experimentId) => {
 
 // Main function
 export const handler = async () => {
-  console.log('Reading current table...');
-  // Get current records in Airtable
-  const records = await getAirtableRecords(table);
-
-  console.log('Clearing table...');
-  // Remove all records
-  await Promise.all(records.reduce((chunks, record, i) => {
-    const j = Math.floor(i / 10);
-    if (!chunks[j]) {
-      chunks[j] = [record];
-    } else {
-      chunks[j].push(record);
-    }
-    return chunks;
-  }, []).map(async (chunk) => {
-    await deleteAirtableRecords(chunk);
-  }));
-
-  console.log('Retrieving Optimizely projects...');
   // Get all projects
+  console.log('Retrieving Optimizely projects...');
   const projects = await getOptimizelyProjects();
 
-  console.log('Inserting Airtable rows...');
   // Iterate over all projects asynchronously
-  await Promise.all(projects.map(async (project) => {
-
-    // Skipping "Dev Test Project"
+  console.log('Retrieving Optimizely experiments...');
+  let experiments = await Promise.all(projects.map(async (project) => {
+    // Skipping dev/qa projects
     if (project.name === 'Dev Test Project' || project.name === 'QA Project (July 2023)') {
       return;
     }
 
     // Get all experiments
-    const experiments = await getOptimizelyExperiments(project.id);
+    return getOptimizelyExperiments(project.id);
+  }));
 
-    // Iterate over all experiments asynchronously
-    await Promise.all(experiments.map(async (experiment) => {
+  // Combine experiments from different projects into single array
+  experiments = experiments.flat().filter(e => !!e);
 
-      // Skip experiments which are archived
-      // Unfortunately the API does not have this filter
-      if (experiment.status === 'archived') {
-        return;
-      }
+  // Iterate over all experiments asynchronously
+  console.log('Retrieving Optimizely results...');
+  let variations = await Promise.all(experiments.map(async (experiment) => {
+    // Skip experiments which are archived
+    // Unfortunately the API does not have this filter
+    if (experiment.status === 'archived') {
+      return;
+    }
 
-      // Get results for experiment only if the experiment is started
-      let results = null;
-      if (experiment.status !== 'not_started') {
-        results = await getOptimizelyResults(experiment.id);
-      }
+    // Get results for experiment only if the experiment is started
+    let results = null;
+    if (experiment.status !== 'not_started') {
+      results = await getOptimizelyResults(experiment.id);
+    }
 
-      // Combine all data into fields for Airtable
-      const rows = buildAirtableRows(project, experiment, results);
+    // Combine all data into fields for Airtable
+    return buildAirtableRows(experiment, results);
+  }));
 
-      await createAirtableRecords(rows);
-    }));
+  // Combine variations from different experiments into single array
+  variations = variations.flat().filter(v => !!v);
+
+  console.log('Reading records from Airtable...');
+  // Get current records in Airtable
+  const records = await getAirtableRecords(table);
+
+  // Updating in Airtable
+  console.log('Creating/updating Airtable records...');
+  await Promise.all(variations.map(async (fields) => {
+    const id = fields['ID'];
+
+    if (id in records) {
+      // Update existing record
+      await updateAirtableRecord(records[id], fields);
+
+      // Mark as done
+      delete records[id];
+    } else {
+      // Insert new record
+      await createAirtableRecord(fields);
+    }
+  }));
+
+  // Remove records that no longer exist
+  console.log('Deleting Airtable records...');
+  await Promise.all(Object.values(records).map(async (recordId) => {
+    await deleteAirtableRecord(recordId);
   }));
 
   console.log('Import completed!');
