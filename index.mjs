@@ -125,17 +125,19 @@ const buildAirtableFields = (project, experiment, results) => {
 
   // Add additional fields from results
   if (results && results.metrics) {
-    const primaryMetric = results.metrics[0];
-
     fields = {
       'Start': results.start_time,
       'End': results.end_time,
-      'Primary Metric': primaryMetric.name,
       ...fields
     };
 
+    // Find the revenue metric (instead of just the primary metric)
+    const metric = results.metrics.find(({name, field, aggregator}) => {
+      return name === 'Universal Sale' && field === 'revenue' && aggregator === 'sum'
+    });
+
     // Find the variation with the highest improvement
-    const winningVariation = Object.values(primaryMetric.results).reduce((acc, variation) => {
+    const winningVariation = Object.values(metric.results).reduce((acc, variation) => {
       if (!variation.lift) {
         return acc;
       }
@@ -152,7 +154,7 @@ const buildAirtableFields = (project, experiment, results) => {
 
     // Add even more additional fields from treatment uplift
     if (winningVariation && winningVariation.lift) {
-      const { lift } = winningVariation;
+      const { lift, value } = winningVariation;
 
       // Don't just show MAX INT
       if (lift.visitors_remaining === 9223372036854776000) {
@@ -160,6 +162,7 @@ const buildAirtableFields = (project, experiment, results) => {
       }
 
       fields = {
+        'Total Revenue': value / 100.0, // Revenue is given in cents
         'Improvement': lift.value,
         'Statistical Significance': lift.significance,
         'Remaining Visitors': lift.visitors_remaining,
