@@ -129,10 +129,10 @@ const buildAirtableFields = (experiment, results, variation, metric) => {
 
   // Add field from reach
   if (results && results.reach && variation.variation_id in results.reach.variations) {
-    const { value } = results.reach.variations[variation.variation_id];
+    const { count } = results.reach.variations[variation.variation_id];
 
     fields = {
-      'Total Visitors': value,
+      'Total Visitors': count,
       ...fields
     };
   }
